@@ -8,11 +8,17 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.media.RingtoneManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -34,8 +40,11 @@ public class PriceService extends Service {
 
     static final String ACTION_RESTART = "com.felix.pricealert.RESTART";
     static final String ACTION_STOP = "com.felix.pricealert.STOP";
+    static final String ACTION_SILENCE = "com.felix.pricealert.SILENCE";
+    static final String EXTRA_SILENCE = "silence";
+    private static final long MAX_RING_MS = 5 * 60 * 1000;
     private static final String CH_LIVE = "live";
-    private static final String CH_ALERT = "alerts";
+    private static final String CH_ALERT = "alarm";
     private static final int NOTIF_ID = 1;
     private static final String FEED = "wss://ws.kraken.com/v2";
 
@@ -49,6 +58,9 @@ public class PriceService extends Service {
     private int backoffMs = 2000;
     private long lastNotifUpdate = 0;
     private String lastError = null;
+    private MediaPlayer player;
+    private Vibrator vibrator;
+    private final Runnable autoStopRing = this::stopRinging;
 
     // ---- helpers used by the screen ----
 
@@ -62,6 +74,14 @@ public class PriceService extends Service {
         Store.init(c);
         if (!Store.isEnabled()) return;
         c.startForegroundService(new Intent(c, PriceService.class).setAction(ACTION_RESTART));
+    }
+
+    /** Stops the alarm sound and vibration. */
+    public static void silence(Context c) {
+        try {
+            c.startService(new Intent(c, PriceService.class).setAction(ACTION_SILENCE));
+        } catch (Exception ignored) {
+        }
     }
 
     public static void stop(Context c) {
@@ -82,11 +102,15 @@ public class PriceService extends Service {
         live.setShowBadge(false);
         nm.createNotificationChannel(live);
 
-        NotificationChannel alerts = new NotificationChannel(CH_ALERT, "Price alerts", NotificationManager.IMPORTANCE_HIGH);
-        alerts.enableVibration(true);
-        alerts.setVibrationPattern(new long[]{0, 400, 200, 400, 200, 400});
+        nm.deleteNotificationChannel("alerts"); // old v1.0 channel
+        NotificationChannel alerts = new NotificationChannel(CH_ALERT, "Price alarms", NotificationManager.IMPORTANCE_HIGH);
+        alerts.setSound(null, null);        // the app plays the looping alarm itself
+        alerts.enableVibration(false);      // ...and the repeating vibration
         alerts.enableLights(true);
+        alerts.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         nm.createNotificationChannel(alerts);
+
+        vibrator = getSystemService(Vibrator.class);
 
         client = new OkHttpClient.Builder()
                 .pingInterval(20, TimeUnit.SECONDS)
@@ -101,6 +125,15 @@ public class PriceService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : null;
+
+        if (ACTION_SILENCE.equals(action)) {
+            stopRinging();
+            if (!running) {
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            return START_STICKY;
+        }
 
         if (ACTION_STOP.equals(action) || (intent == null && !Store.isEnabled())) {
             Store.setEnabled(false);
@@ -136,6 +169,7 @@ public class PriceService extends Service {
     public void onDestroy() {
         running = false;
         connGen++;
+        stopRinging();
         main.removeCallbacksAndMessages(null);
         if (ws != null) ws.close(1000, "bye");
         ws = null;
@@ -293,14 +327,84 @@ public class PriceService extends Service {
     private void fireAlert(Store.Alert a, double last) {
         String title = PriceHub.name(a.symbol) + (a.above ? " rose above " : " fell below ") + PriceHub.fmt(a.price);
         String body = "Now " + PriceHub.fmt(last) + "  (" + a.symbol + ")";
+
+        PendingIntent silence = PendingIntent.getService(this, 2,
+                new Intent(this, PriceService.class).setAction(ACTION_SILENCE),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent open = new Intent(this, MainActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(EXTRA_SILENCE, true);
+        PendingIntent openAndSilence = PendingIntent.getActivity(this, 3, open,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
         Notification n = new Notification.Builder(this, CH_ALERT)
                 .setSmallIcon(R.drawable.ic_stat)
                 .setContentTitle(title)
                 .setContentText(body)
                 .setCategory(Notification.CATEGORY_ALARM)
                 .setAutoCancel(true)
-                .setContentIntent(openApp())
+                .setContentIntent(openAndSilence)
+                .setDeleteIntent(silence)
+                .addAction(new Notification.Action.Builder(null, "Stop ringing", silence).build())
                 .build();
         nm.notify((int) (a.id % 1_000_000) + 100, n);
+
+        main.post(this::startRinging);
+    }
+
+    // ---- alarm sound + vibration ----
+
+    private void startRinging() {
+        AudioAttributes alarm = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build();
+
+        if (!Store.ringEnabled()) {
+            // single buzz only
+            if (vibrator != null && vibrator.hasVibrator()) {
+                vibrator.vibrate(VibrationEffect.createWaveform(new long[]{0, 400, 200, 400}, -1), alarm);
+            }
+            return;
+        }
+
+        PriceHub.ringing = true;
+        main.removeCallbacks(autoStopRing);
+        main.postDelayed(autoStopRing, MAX_RING_MS);
+
+        if (player == null) {
+            try {
+                Uri uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+                if (uri == null) uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+                if (uri == null) uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+                player = new MediaPlayer();
+                player.setAudioAttributes(alarm);
+                player.setDataSource(this, uri);
+                player.setLooping(true);
+                player.prepare();
+                player.start();
+            } catch (Exception e) {
+                if (player != null) player.release();
+                player = null;
+            }
+        }
+        if (vibrator != null && vibrator.hasVibrator()) {
+            // vibrate 0.8 s, pause 0.5 s, repeat until stopped
+            vibrator.vibrate(VibrationEffect.createWaveform(new long[]{0, 800, 500}, 0), alarm);
+        }
+    }
+
+    private void stopRinging() {
+        main.removeCallbacks(autoStopRing);
+        PriceHub.ringing = false;
+        if (player != null) {
+            try {
+                player.stop();
+            } catch (Exception ignored) {
+            }
+            player.release();
+            player = null;
+        }
+        if (vibrator != null) vibrator.cancel();
     }
 }

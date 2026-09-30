@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
 
     private LinearLayout priceBox, alertBox;
     private TextView statusView;
-    private Button toggleBtn, batteryBtn;
+    private Button toggleBtn, batteryBtn, ringModeBtn, stopRingBtn;
     private Spinner symSpin, condSpin;
     private EditText priceInput, symbolInput;
 
@@ -78,6 +78,21 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
         }
         if (Store.isEnabled()) PriceService.start(this);
+        handleSilence(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleSilence(intent);
+    }
+
+    private void handleSilence(Intent intent) {
+        if (intent != null && intent.getBooleanExtra(PriceService.EXTRA_SILENCE, false)) {
+            PriceService.silence(this);
+            intent.removeExtra(PriceService.EXTRA_SILENCE);
+        }
     }
 
     @Override
@@ -111,6 +126,16 @@ public class MainActivity extends Activity {
         statusView = text("", 13, MUTED);
         statusView.setPadding(0, dp(2), 0, dp(12));
         root.addView(statusView);
+
+        stopRingBtn = button("Stop ringing", true);
+        stopRingBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        stopRingBtn.setOnClickListener(v -> {
+            PriceService.silence(this);
+            PriceHub.ringing = false;
+            refresh();
+        });
+        stopRingBtn.setVisibility(View.GONE);
+        root.addView(stopRingBtn, new LinearLayout.LayoutParams(-1, dp(72)));
 
         // Live prices
         root.addView(section("LIVE PRICES"));
@@ -153,6 +178,16 @@ public class MainActivity extends Activity {
         root.addView(hint("Tap an alert to switch it on/off. Long-press to delete."));
 
         // Controls
+        root.addView(section("ALARM"));
+        ringModeBtn = button("", false);
+        ringModeBtn.setOnClickListener(v -> {
+            Store.setRing(!Store.ringEnabled());
+            refresh();
+        });
+        root.addView(ringModeBtn, new LinearLayout.LayoutParams(-1, -2));
+        root.addView(hint("Continuous ring uses your alarm sound and plays even in silent mode, "
+                + "until you tap Stop ringing (auto-stops after 5 minutes)."));
+
         root.addView(section("BACKGROUND"));
         toggleBtn = button("", false);
         toggleBtn.setOnClickListener(v -> {
@@ -212,6 +247,10 @@ public class MainActivity extends Activity {
             rebuildAlerts();
         }
         toggleBtn.setText(enabled ? "Stop monitoring" : "Start monitoring");
+        ringModeBtn.setText(Store.ringEnabled()
+                ? "Alert style: Ring continuously  (tap to change)"
+                : "Alert style: Vibrate once  (tap to change)");
+        stopRingBtn.setVisibility(PriceHub.ringing ? View.VISIBLE : View.GONE);
 
         PowerManager pm = getSystemService(PowerManager.class);
         batteryBtn.setVisibility(pm.isIgnoringBatteryOptimizations(getPackageName()) ? View.GONE : View.VISIBLE);

@@ -36,6 +36,7 @@ public final class PriceHub {
 
     public static volatile String status = "Stopped";
     public static volatile boolean live = false;
+    public static volatile boolean ringing = false;
 
     private PriceHub() {}
 

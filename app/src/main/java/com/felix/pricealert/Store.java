@@ -165,6 +165,14 @@ public final class Store {
 
     public static synchronized boolean isEnabled() { return prefs.getBoolean("enabled", true); }
 
+    /** Ring continuously (alarm) until stopped, instead of a single buzz. */
+    public static synchronized boolean ringEnabled() { return prefs.getBoolean("ring", true); }
+
+    public static synchronized void setRing(boolean on) {
+        prefs.edit().putBoolean("ring", on).apply();
+        version++;
+    }
+
     public static synchronized void setEnabled(boolean on) {
         prefs.edit().putBoolean("enabled", on).apply();
         version++;
