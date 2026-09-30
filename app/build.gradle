@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.felix.pricealert'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.felix.pricealert"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        debug {
+            // Key kept in the repo so every new build installs over the old one
+            storeFile rootProject.file("signing/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}
